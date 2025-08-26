@@ -61,7 +61,9 @@ def clean_srt_and_structure(
             continue
         if ts_pattern.search(line):
             continue
-        cleaned = re.sub(r'\s+', ' ', line).strip()
+        # remove bullet dots and normalize spaces
+        cleaned = re.sub(r'[·•●▪◦]', '', line)   # removes common bullet characters
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         if cleaned:
             merged_text.append(cleaned)
 
