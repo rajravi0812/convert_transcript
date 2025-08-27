@@ -1,168 +1,107 @@
 import re
 import streamlit as st
 from docx import Document
+from docx.shared import RGBColor
 from io import BytesIO
 
 # -----------------------------
-# Core processing functions
+# Processing Functions
 # -----------------------------
-def split_into_sentences(text: str):
-    """Split text into sentences while keeping punctuation. Avoid splitting on ellipses (...)."""
-    text = re.sub(r'\s+', ' ', text).strip()
-    if not text:
-        return []
-    text = text.replace("...", " …ELLIPSIS… ")
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    sentences = []
-    for p in parts:
-        p = p.replace("…ELLIPSIS…", "...").strip()
-        if p:
-            sentences.append(p)
-    return sentences
+def clean_and_structure(raw_text: str):
+    """Clean SRT text and classify into headings, subheadings, bullets, normal."""
+    # Remove timestamps and indexes
+    cleaned = re.sub(r"^\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}", "", raw_text, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\d+\s*\n", "", cleaned, flags=re.MULTILINE)
 
-def flush_paragraphs(sentences, sentences_per_paragraph: int = 1):
-    """Each sentence becomes its own paragraph."""
-    paragraphs = []
-    for sentence in sentences:
-        if sentence.strip():
-            paragraphs.append(sentence.strip())
-    return paragraphs
+    # Join all lines into a single line to remove breaks
+    text = " ".join(line.strip() for line in cleaned.splitlines() if line.strip())
 
-def clean_srt_and_structure(
-    srt_text: str,
-    detect_headings: bool = True,
-    markdown_headings: bool = False,
-):
-    """Main cleaning logic for transcript/SRT"""
-    raw_lines = srt_text.splitlines()
+    # Split text into sentences by period (.) but keep things like "Input Text:" intact
+    sentences = re.split(r"(?<=\.)\s+", text)
+    structured = []
 
-    ts_pattern = re.compile(r'\b\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\b')
-    index_line = re.compile(r'^\s*\d+\s*$')
-
-    merged_text = []
-    for line in raw_lines:
-        if index_line.match(line):
+    for s in sentences:
+        s_clean = s.strip()
+        if not s_clean:
             continue
-        if ts_pattern.search(line):
-            continue
-        cleaned = re.sub(r'\s+', ' ', line).strip()
-        if cleaned:
-            merged_text.append(cleaned)
 
-    joined_text = " ".join(merged_text)
-    all_sentences = split_into_sentences(joined_text)
-
-    out_blocks = []
-    current_heading = ""
-    sentence_buffer = []
-
-    def push_section():
-        nonlocal sentence_buffer, current_heading, out_blocks
-        if not sentence_buffer:
-            return
-        paragraphs = flush_paragraphs(sentence_buffer, 1)  # always 1 sentence per paragraph
-        if current_heading:
-            if markdown_headings:
-                out_blocks.append(f"## {current_heading.strip()}")
-            else:
-                out_blocks.append(current_heading.strip().upper())
-                out_blocks.append("=" * len(current_heading.strip()))
-        for p in paragraphs:
-            out_blocks.append(p)
-            out_blocks.append("")  # blank line
-        sentence_buffer = []
-
-    for sentence in all_sentences:
-        if detect_headings and ":" in sentence:
-            head, tail = sentence.split(":", 1)
-            if len(head.strip()) >= 8 or len(head.strip().split()) >= 2:
-                push_section()
-                current_heading = head.strip()
-                remainder = tail.strip()
-                if remainder:
-                    sentence_buffer.extend(split_into_sentences(remainder))
+        # Split by bullet '•' if multiple bullets exist
+        parts = re.split(r"•", s_clean)
+        for part in parts:
+            part = part.strip()
+            if not part:
                 continue
-        sentence_buffer.append(sentence)
 
-    push_section()
-    final_text = "\n".join(out_blocks).strip() + "\n"
-    return final_text
+            # Heading: numbered headings OR Module <digit>:
+            if re.match(r"^\d+(\.\d+)*\s", part) or re.search(r"Module\s\d+:", part, re.IGNORECASE):
+                structured.append(("heading", part))
 
-def export_to_word(text: str) -> BytesIO:
-    """Export formatted text to Word with bold headings."""
+            # Subheading: ends with colon OR starts with Example / Case Study / Contents
+            elif part.endswith(":") or re.match(r"(Example|Case Study|Contents)\s?\d*:", part, re.IGNORECASE):
+                structured.append(("subheading", part))
+
+            # Bullet: starts with bullet but NOT ending with colon
+            elif part.startswith("·") or part.startswith("•"):
+                structured.append(("bullet", part))
+
+            # Normal text
+            else:
+                structured.append(("normal", part))
+
+    return structured
+
+def build_word_doc(structured):
+    """Generate Word document with formatting."""
     doc = Document()
-    lines = text.splitlines()
 
-    for i, line in enumerate(lines):
-        if not line.strip():
-            continue
-        if line.startswith("## "):
-            doc.add_heading(line.replace("##", "").strip(), level=2)
-        elif i + 1 < len(lines) and set(lines[i + 1]) == {"="}:
-            doc.add_heading(line.strip(), level=1)
-        else:
-            doc.add_paragraph(line)
+    for typ, text in structured:
+        if typ == "heading":
+            p = doc.add_paragraph()
+            run = p.add_run(text)
+            run.bold = True
+            run.font.color.rgb = RGBColor(100, 149, 237)  # Soft blue
 
+        elif typ == "subheading":
+            p = doc.add_paragraph()
+            run = p.add_run(text)
+            run.bold = True
+            # run.underline = True
+            run.font.color.rgb = RGBColor(0, 0, 0)  # Black
+
+        elif typ == "bullet":
+            p = doc.add_paragraph()
+            run = p.add_run(text)
+            run.bold = True
+
+        else:  # normal sentence
+            p = doc.add_paragraph()
+            run = p.add_run(text)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+
+    # Save to BytesIO
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
 # -----------------------------
-# Streamlit UI
+# Streamlit App
 # -----------------------------
-st.set_page_config(page_title="SRT/Transcript Cleaner → TXT/Word", layout="centered")
-st.title("📖 SRT/Transcript Cleaner → TXT / Word")
+st.title("📘 SRT Text Cleaner & Word Converter")
 
-st.write(
-    "Paste your transcript or SRT text below. This tool will remove timestamps and numeric counters, "
-    "turn `Heading:` patterns into headings, and put each sentence into its own paragraph."
-)
+input_text = st.text_area("Paste your transcript text here:", height=400)
 
-with st.sidebar:
-    st.header("⚙️ Options")
-    detect_headings = st.checkbox("Treat `text:` as a heading", value=True)
-    markdown_headings = st.checkbox("Use Markdown headings (##)", value=False)
+if st.button("Convert to Word"):
+    if input_text.strip():
+        structured = clean_and_structure(input_text)
+        word_file = build_word_doc(structured)
 
-sample = st.toggle("Load sample")
-default_text = ""
-if sample:
-    default_text = """1
-00:00:00,600 --> 00:00:05,569
-Welcome to Module 7: In this module we will cover X, Y, Z.
-2
-00:00:05,819 --> 00:00:11,496
-This is a sample line. Here is another sentence. And one more. Final sentence!
-"""
-
-raw = st.text_area("Paste SRT or transcript text", value=default_text, height=300, placeholder="Paste here...")
-
-if st.button("Convert"):
-    output = clean_srt_and_structure(
-        raw,
-        detect_headings=detect_headings,
-        markdown_headings=markdown_headings,
-    )
-
-    st.subheader("📝 Result (TXT)")
-    st.text_area("Cleaned & Organized Text", value=output, height=300)
-
-    st.download_button(
-        label="⬇️ Download .txt",
-        data=output.encode("utf-8"),
-        file_name="cleaned_transcript.txt",
-        mime="text/plain"
-    )
-
-    word_buffer = export_to_word(output)
-    st.download_button(
-        label="⬇️ Download .docx",
-        data=word_buffer,
-        file_name="cleaned_transcript.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
-
-st.markdown("---")
-st.caption("✅ Each sentence is placed in its own paragraph.\n"
-           "✅ Headings are auto-highlighted.\n"
-           "✅ Export available as TXT or Word (with styled headings).")
+        st.success("✅ Conversion complete!")
+        st.download_button(
+            label="📥 Download Word File",
+            data=word_file,
+            file_name="converted.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.error("⚠️ Please paste some text first!")
